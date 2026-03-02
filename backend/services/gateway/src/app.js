@@ -5,12 +5,12 @@ import authRoutes from "./routes/auth.routes.js";
 import historyRoutes from "./routes/history.routes.js";
 
 const app = express();
-
 app.use(express.json());
 
-// ✅ CORS (Frontend only)
-const FRONTEND_ORIGIN = "http://localhost:5173";
+// ✅ Use ENV in production, fallback to localhost in dev
+const FRONTEND_ORIGIN = process.env.FRONTEND_URL || "http://localhost:5173";
 
+// ✅ Express CORS
 app.use(
   cors({
     origin: FRONTEND_ORIGIN,
