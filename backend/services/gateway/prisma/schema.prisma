@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Problem {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title         String
+  statement     String
+  topic         String
+  difficulty    String
+  inputFormat   String?
+  outputFormat  String?
+  constraints   String?
+  source        String?
+  externalId    String?
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime      @default(now()) @db.Timestamptz(6)
+  fnName        String?
+  starterJava   String?
+  starterPython String?
+  starterCpp    String?
+  starterJs     String?
+  RoomProblem   RoomProblem[]
+  Submission    Submission[]
+  Testcase      Testcase[]
+
+  @@index([difficulty])
+  @@index([topic])
+}
+
+model Room {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomCode      String        @unique
+  status        String        @default("WAITING")
+  topic         String?
+  questionCount Int?
+  timerSeconds  Int?
+  startTime     DateTime?     @db.Timestamptz(6)
+  endTime       DateTime?     @db.Timestamptz(6)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime      @default(now()) @db.Timestamptz(6)
+  hostUserId    String        @db.Uuid
+  RoomPlayer    RoomPlayer[]
+  RoomProblem   RoomProblem[]
+  Submission    Submission[]
+
+  @@index([hostUserId])
+  @@index([status])
+}
+
+model RoomPlayer {
+  id       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId   String    @db.Uuid
+  userId   String    @db.Uuid
+  joinedAt DateTime  @default(now()) @db.Timestamptz(6)
+  leftAt   DateTime? @db.Timestamptz(6)
+  score    Int       @default(0)
+  isReady  Boolean   @default(false)
+  Room     Room      @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([roomId, userId], map: "RoomPlayer_roomId_userId_unique")
+  @@index([roomId])
+  @@index([userId])
+}
+
+model RoomProblem {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String   @db.Uuid
+  problemId String   @db.Uuid
+  order     Int
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  Problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  Room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([roomId, order], map: "RoomProblem_roomId_order_unique")
+  @@unique([roomId, problemId], map: "RoomProblem_roomId_problemId_unique")
+  @@index([roomId])
+}
+
+model Session {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  token     String   @unique
+  expiresAt DateTime @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([userId])
+}
+
+model Submission {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId       String   @db.Uuid
+  userId       String   @db.Uuid
+  problemId    String   @db.Uuid
+  language     String
+  sourceCode   String
+  verdict      String   @default("PENDING")
+  scoreDelta   Int      @default(0)
+  judgeToken   String?
+  timeMs       Int?
+  memoryKb     Int?
+  errorMessage String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  Problem      Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  Room         Room     @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([problemId])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model Testcase {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  problemId String   @db.Uuid
+  input     String
+  expected  String
+  isSample  Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  Problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([problemId])
+}
+
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  username     String
+  email        String   @unique
+  passwordHash String?
+  googleId     String?  @unique
+  avatarUrl    String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @db.Timestamptz(6)
+}

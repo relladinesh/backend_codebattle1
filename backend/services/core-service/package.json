@@ -1,0 +1,28 @@
+{
+  "name": "core-service",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "license": "ISC",
+
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy"
+  },
+
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.3",
+    "@grpc/proto-loader": "^0.8.0",
+    "@prisma/client": "^5.10.2",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "google-auth-library": "^10.5.0",
+    "jsonwebtoken": "^9.0.3"
+  },
+
+  "devDependencies": {
+    "prisma": "^5.10.2"
+  }
+}

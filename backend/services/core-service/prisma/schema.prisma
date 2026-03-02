@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+
+model Problem {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title        String
+  statement    String
+  topic        String
+  difficulty   String
+
+  // ✅ LeetCode-style metadata
+  fnName       String?
+  inputFormat  String?
+  outputFormat String?
+
+  // ✅ Optional content
+  constraints  String?
+  source       String?
+  externalId   String?
+
+  // ✅ Starter templates (logic-only)
+  starterJava   String?
+  starterPython String?
+  starterCpp    String?
+  starterJs     String?
+
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  testcases    Testcase[]
+  roomProblems RoomProblem[]
+  submissions  Submission[]
+
+  @@index([topic])
+  @@index([difficulty])
+}
+
+model User {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  username     String
+  email        String    @unique
+  passwordHash String?
+  googleId     String?   @unique
+  avatarUrl    String?
+
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
+
+  // ✅ clear relations
+  hostedRooms  Room[]      @relation("RoomHost")
+  roomPlayers  RoomPlayer[]
+  sessions     Session[]
+  submissions  Submission[]
+}
+
+
+
+model Room {
+  id            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomCode      String       @unique
+  status        String       @default("WAITING")
+  topic         String?
+  questionCount Int?
+  timerSeconds  Int?
+  startTime     DateTime?    @db.Timestamptz(6)
+  endTime       DateTime?    @db.Timestamptz(6)
+
+  createdAt     DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime     @updatedAt @db.Timestamptz(6)
+
+  // ✅ host relation fixed
+  hostUserId    String       @db.Uuid
+  hostUser      User         @relation("RoomHost", fields: [hostUserId], references: [id])
+
+  players       RoomPlayer[]
+  problems      RoomProblem[]
+  submissions   Submission[]
+
+  @@index([hostUserId])
+  @@index([status])
+}
+
+model RoomPlayer {
+  id       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId   String    @db.Uuid
+  userId   String    @db.Uuid
+
+  joinedAt DateTime  @default(now()) @db.Timestamptz(6)
+  leftAt   DateTime? @db.Timestamptz(6)
+
+  score    Int       @default(0)
+  isReady  Boolean   @default(false)
+
+  room     Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId], map: "RoomPlayer_roomId_userId_unique")
+  @@index([roomId])
+  @@index([userId])
+}
+
+model RoomProblem {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String   @db.Uuid
+  problemId String   @db.Uuid
+  order     Int
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, order], map: "RoomProblem_roomId_order_unique")
+  @@unique([roomId, problemId], map: "RoomProblem_roomId_problemId_unique")
+  @@index([roomId])
+  @@index([problemId])
+}
+
+
+model Submission {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  roomId       String   @db.Uuid
+  userId       String   @db.Uuid
+  problemId    String   @db.Uuid
+
+  language     String
+  sourceCode   String
+
+  verdict      String   @default("PENDING")
+  scoreDelta   Int      @default(0)
+
+  judgeToken   String?
+  timeMs       Int?
+  memoryKb     Int?
+  errorMessage String?
+
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  room         Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem      Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@index([userId])
+  @@index([problemId])
+}
+
+
+
+model Testcase {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  problemId String   @db.Uuid
+
+  input     String
+  expected  String
+  isSample  Boolean  @default(false)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([problemId])
+}
+
+model Session {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+
+  token     String   @unique
+  expiresAt DateTime @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

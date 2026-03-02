@@ -1,0 +1,274 @@
+syntax = "proto3";
+
+package core;
+
+/* ==============================
+   PROBLEM SERVICE (CORE DB)
+   ============================== */
+
+service ProblemService {
+  rpc GetRandomProblems (GetRandomProblemsRequest)
+      returns (GetRandomProblemsResponse);
+
+  rpc GetProblemDetails (GetProblemDetailsRequest)
+      returns (GetProblemDetailsResponse);
+}
+
+/* ==============================
+   BATTLE SERVICE (STORE HISTORY)
+   ============================== */
+
+service BattleService {
+  rpc PersistBattleResult (PersistBattleResultRequest)
+      returns (PersistBattleResultResponse);
+
+  rpc PersistSubmission (PersistSubmissionRequest)
+      returns (PersistSubmissionResponse);
+}
+
+/* ==============================
+   JUDGE SERVICE
+   ============================== */
+
+service JudgeService {
+  rpc JudgeSubmission (JudgeSubmissionRequest)
+      returns (JudgeSubmissionResponse);
+}
+
+/* ==============================
+   HISTORY SERVICE (READ HISTORY)
+   ============================== */
+
+service HistoryService {
+  rpc GetRecentBattles (GetRecentBattlesRequest)
+      returns (GetRecentBattlesResponse);
+
+  rpc GetBattleDetails (GetBattleDetailsRequest)
+      returns (GetBattleDetailsResponse);
+}
+
+/* ==============================
+   PROBLEM MESSAGES
+   ============================== */
+
+message Problem {
+  string id = 1;
+  string title = 2;
+  string statement = 3;
+  string topic = 4;
+  string difficulty = 5;
+
+  // ✅ LeetCode style fields
+  string fnName = 6;
+  string inputFormat = 7;
+  string outputFormat = 8;
+
+  string starterJava = 9;
+  string starterPython = 10;
+  string starterCpp = 11;
+  string starterJs = 12;
+}
+
+message Testcase {
+  string input = 1;
+  string expected = 2;
+  bool isSample = 3;
+}
+
+message GetRandomProblemsRequest {
+  string topic = 1;
+  int32 count = 2;
+}
+
+message GetRandomProblemsResponse {
+  repeated Problem problems = 1;
+}
+
+message GetProblemDetailsRequest {
+  string problemId = 1;
+  bool includeHidden = 2;
+}
+
+message GetProblemDetailsResponse {
+  Problem problem = 1;
+  repeated Testcase testcases = 2;
+}
+
+/* ==============================
+   PERSIST BATTLE RESULT
+   ============================== */
+
+message PersistBattleResultRequest {
+  RoomSnapshot room = 1;
+}
+
+message PersistBattleResultResponse {
+  bool ok = 1;
+  string dbRoomId = 2;
+  string message = 3;
+}
+
+message RoomSnapshot {
+  string roomId = 1;
+  string status = 2;
+  string topic = 3;
+
+  int32 questionCount = 4;
+  int32 timerSeconds = 5;
+
+  int64 startTimeMs = 6;
+  int64 endTimeMs = 7;
+
+  string hostUserId = 8;
+  string winnerUserId = 9;
+
+  repeated PlayerSnapshot players = 10;
+  repeated QuestionSnapshot questions = 11;
+
+  map<string, int32> scores = 12;
+  map<string, bool> ready = 13;
+}
+
+message PlayerSnapshot {
+  string userId = 1;
+  string email = 2;
+}
+
+message QuestionSnapshot {
+  string problemId = 1;
+  int32 order = 2;
+}
+
+/* ==============================
+   PERSIST SUBMISSION
+   ============================== */
+
+message PersistSubmissionRequest {
+  string roomId = 1;
+  string userId = 2;
+  string problemId = 3;
+
+  string language = 4;
+  string sourceCode = 5;
+
+  string verdict = 6;
+  int32 scoreDelta = 7;
+
+  int32 timeMs = 8;
+  int32 memoryKb = 9;
+  string errorMessage = 10;
+}
+
+message PersistSubmissionResponse {
+  bool ok = 1;
+  string submissionId = 2;
+  string message = 3;
+}
+
+/* ==============================
+   JUDGE SUBMISSION
+   ============================== */
+
+message JudgeSubmissionRequest {
+  string roomId = 1;
+  string userId = 2;
+  string problemId = 3;
+  string language = 4;
+  string sourceCode = 5;
+}
+
+message JudgeSubmissionResponse {
+  string verdict = 1;
+  int32 passed = 2;
+  int32 total = 3;
+  int32 scoreDelta = 4;
+}
+
+/* ==============================
+   HISTORY: RECENT BATTLES
+   ============================== */
+
+message GetRecentBattlesRequest {
+  int32 limit = 1;
+}
+
+message BattleListItem {
+  string roomCode = 1;
+  string status = 2;
+  string topic = 3;
+  int32 questionCount = 4;
+  int32 timerSeconds = 5;
+
+  int64 createdAtMs = 6;
+  int64 startTimeMs = 7;
+  int64 endTimeMs = 8;
+
+  string hostUserId = 9;
+  string winnerUserId = 10;
+
+  int32 playerCount = 11;
+
+  string winnerUsername = 12;
+}
+
+message GetRecentBattlesResponse {
+  repeated BattleListItem battles = 1;
+}
+
+/* ==============================
+   HISTORY: BATTLE DETAILS
+   ============================== */
+
+message GetBattleDetailsRequest {
+  string roomCode = 1;
+}
+
+message BattlePlayer {
+  string userId = 1;
+  int32 score = 2;
+  bool isReady = 3;
+  string username = 4;
+  string email = 5;
+}
+
+message BattleProblem {
+  string problemId = 1;
+  int32 order = 2;
+  string title = 3;
+  string topic = 4;
+  string difficulty = 5;
+}
+
+message BattleSubmission {
+  string id = 1;
+  string userId = 2;
+  string problemId = 3;
+  string verdict = 4;
+  int32 scoreDelta = 5;
+  string language = 6;
+  int64 createdAtMs = 7;
+  string username = 8;
+}
+
+message GetBattleDetailsResponse {
+  bool ok = 1;
+  string message = 2;
+
+  string roomCode = 3;
+  string status = 4;
+  string topic = 5;
+  int32 questionCount = 6;
+  int32 timerSeconds = 7;
+  int64 createdAtMs = 8;
+  int64 startTimeMs = 9;
+  int64 endTimeMs = 10;
+
+  string hostUserId = 11;
+  string winnerUserId = 12;
+
+  string winnerUsername = 16;
+
+  repeated BattlePlayer players = 13;
+  repeated BattleProblem problems = 14;
+  repeated BattleSubmission submissions = 15;
+}
