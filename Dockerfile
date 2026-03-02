@@ -28,4 +28,4 @@ RUN npx prisma generate
 EXPOSE 10000
 
 # Start Core gRPC (background) + Gateway (foreground)
-CMD sh -c "node backend/services/core-service/src/index.js & node backend/services/gateway/src/server.js"
+CMD sh -c "node /app/backend/services/core-service/src/index.js & node /app/backend/services/gateway/src/server.js"
