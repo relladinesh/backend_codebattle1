@@ -5,37 +5,27 @@ WORKDIR /app
 # Install OpenSSL (required for Prisma)
 RUN apt-get update -y && apt-get install -y openssl
 
-# -----------------------------
-# Install dependencies
-# -----------------------------
+# Copy package files
 COPY backend/services/core-service/package*.json ./backend/services/core-service/
 WORKDIR /app/backend/services/core-service
+
+# Install dependencies
 RUN npm install
 
-# -----------------------------
-# Copy app code
-# -----------------------------
+# Copy source code
 COPY backend/services/core-service/prisma ./prisma
 COPY backend/services/core-service/src ./src
 
 # Shared protos
 COPY backend/proto /app/backend/proto
 
-# -----------------------------
-# Generate Prisma Client
-# -----------------------------
+# Generate Prisma client
 RUN npx prisma generate
 
-# -----------------------------
-# Expose Ports
-# -----------------------------
-EXPOSE 50051 50053
+# Set ports (merged)
+ENV CORE_GRPC_PORT=50051
+ENV AUTH_GRPC_PORT=50051
 
-# -----------------------------
-# Start Server (NO migrate deploy)
-# -----------------------------
-CMD sh -c "\
-  export CORE_GRPC_PORT=${PORT:-50051} && \
-  export AUTH_GRPC_PORT=${AUTH_GRPC_PORT:-50053} && \
-  node src/index.js \
-"
+EXPOSE 50051
+
+CMD ["node", "src/index.js"]
