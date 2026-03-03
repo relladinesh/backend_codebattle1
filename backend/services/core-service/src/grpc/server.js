@@ -336,6 +336,148 @@ export function startGrpcAll(port = 50051) {
         cb(e);
       }
     },
+    GetBattleDetails: async (call, cb) => {
+    try {
+      const roomCode = String(call.request?.roomCode || "").trim();
+      if (!roomCode) return cb(null, { ok: false, message: "roomCode is required" });
+
+      const room = await prisma.room.findUnique({
+        where: { roomCode },
+        select: {
+          id: true,
+          roomCode: true,
+          status: true,
+          topic: true,
+          questionCount: true,
+          timerSeconds: true,
+          createdAt: true,
+          startTime: true,
+          endTime: true,
+          hostUserId: true,
+        },
+      });
+
+      if (!room) return cb(null, { ok: false, message: "Room not found" });
+
+      const [players, problems, submissions] = await Promise.all([
+        prisma.roomPlayer.findMany({
+          where: { roomId: room.id },
+          select: { userId: true, score: true, isReady: true },
+          orderBy: { score: "desc" },
+        }),
+        prisma.roomProblem.findMany({
+          where: { roomId: room.id },
+          select: { problemId: true, order: true },
+          orderBy: { order: "asc" },
+        }),
+        prisma.submission.findMany({
+          where: { roomId: room.id },
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            userId: true,
+            problemId: true,
+            verdict: true,
+            scoreDelta: true,
+            language: true,
+            createdAt: true,
+          },
+        }),
+      ]);
+
+      const userIds = [
+        ...new Set([
+          ...players.map((p) => p.userId),
+          ...submissions.map((s) => s.userId),
+        ]),
+      ];
+
+      const users = userIds.length
+        ? await prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: { id: true, username: true, email: true },
+          })
+        : [];
+
+      const userMap = new Map(users.map((u) => [u.id, u]));
+
+      // winner = highest score (if tie, keep empty winnerUsername or decide tie logic)
+      const sortedPlayers = [...players].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+      const topScore = sortedPlayers[0]?.score ?? 0;
+      const topPlayers = sortedPlayers.filter((p) => (p.score ?? 0) === topScore);
+
+      const winnerUserId = topPlayers.length === 1 ? topPlayers[0].userId : "";
+      const winnerUser = winnerUserId ? userMap.get(winnerUserId) : null;
+
+      const battlePlayers = players.map((p) => {
+        const u = userMap.get(p.userId);
+        return {
+          userId: p.userId,
+          score: Number(p.score ?? 0),
+          isReady: !!p.isReady,
+          username: u?.username || "",
+          email: u?.email || "",
+        };
+      });
+
+      // fetch problem metadata (optional but useful)
+      const problemIds = problems.map((p) => p.problemId);
+      const problemMeta = problemIds.length
+        ? await prisma.problem.findMany({
+            where: { id: { in: problemIds } },
+            select: { id: true, title: true, topic: true, difficulty: true },
+          })
+        : [];
+      const pMap = new Map(problemMeta.map((p) => [p.id, p]));
+
+      const battleProblems = problems.map((p) => {
+        const meta = pMap.get(p.problemId);
+        return {
+          problemId: p.problemId,
+          order: Number(p.order ?? 1),
+          title: meta?.title || "",
+          topic: meta?.topic || "",
+          difficulty: meta?.difficulty || "",
+        };
+      });
+
+      const battleSubs = submissions.map((s) => {
+        const u = userMap.get(s.userId);
+        return {
+          id: s.id,
+          userId: s.userId,
+          problemId: s.problemId,
+          verdict: s.verdict || "",
+          scoreDelta: Number(s.scoreDelta ?? 0),
+          language: s.language || "",
+          createdAtMs: ms(s.createdAt),
+          username: u?.username || u?.email || "",
+        };
+      });
+
+      return cb(null, {
+        ok: true,
+        message: "OK",
+        roomCode: room.roomCode,
+        status: room.status || "",
+        topic: room.topic || "",
+        questionCount: room.questionCount ?? 0,
+        timerSeconds: room.timerSeconds ?? 0,
+        createdAtMs: ms(room.createdAt),
+        startTimeMs: ms(room.startTime),
+        endTimeMs: ms(room.endTime),
+        hostUserId: room.hostUserId || "",
+        winnerUserId,
+        winnerUsername: winnerUser?.username || winnerUser?.email || "",
+        players: battlePlayers,
+        problems: battleProblems,
+        submissions: battleSubs,
+      });
+    } catch (e) {
+      console.error("GetBattleDetails error:", e);
+      return cb(e);
+    }
+  },
   });
 
   /* =========================

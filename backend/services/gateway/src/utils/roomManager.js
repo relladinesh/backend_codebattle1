@@ -44,18 +44,15 @@ function computeWinner(scores = {}) {
     return { winner: null, isDraw: true, drawReason: "NO_PLAYERS" };
   }
 
-  // sort high->low
   entries.sort((a, b) => b[1] - a[1]);
-
   const topScore = entries[0][1];
 
-  // all 0 => draw
   if (topScore <= 0) {
     return { winner: null, isDraw: true, drawReason: "ALL_ZERO" };
   }
 
-  // tie check: if 2nd score == topScore => draw
-  if (entries.length >= 2 && entries[1][1] === topScore) {
+  const tied = entries.filter(([, sc]) => sc === topScore).length;
+  if (tied > 1) {
     return { winner: null, isDraw: true, drawReason: "TIE" };
   }
 
@@ -100,7 +97,7 @@ export async function createRoom(hostUser, config = {}) {
     startTimeMs: null,
     endTimeMs: null,
 
-    // ✅ new fields for draw support
+    // ✅ draw fields
     winner: null,
     isDraw: false,
     drawReason: null,
@@ -123,8 +120,10 @@ export async function joinRoom(roomId, user) {
     const exists = room.players.some((p) => p.userId === user.userId);
     if (!exists) {
       room.players.push(user);
+
       room.scores = room.scores || {};
       room.scores[user.userId] = 0;
+
       room.ready = room.ready || {};
       room.ready[user.userId] = false;
     }
@@ -210,6 +209,12 @@ export async function updateScore(roomId, userId, delta) {
   });
 }
 
+/**
+ * ✅ LEAVE RULES (what you asked):
+ * - If last person leaves => FINISHED (and draw/no winner)
+ * - If host leaves while others exist => CANCELLED
+ * - If someone leaves during ACTIVE => FINISHED (winner/draw computed)
+ */
 export async function leaveRoom(roomId, userId) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
@@ -225,15 +230,38 @@ export async function leaveRoom(roomId, userId) {
     if (room.scores) delete room.scores[userId];
     if (room.solved) delete room.solved[userId];
 
-    if (leaving.userId === room.hostUser.userId) {
+    // ✅ If nobody left => FINISH + DRAW (important for history)
+    if (room.players.length === 0) {
+      room.status = "FINISHED";
+      room.endTimeMs = Date.now();
+
+      room.winner = null;
+      room.isDraw = true;
+      room.drawReason = "NO_PLAYERS";
+
+      await saveRoom(roomId, room);
+      return { finished: true, room };
+    }
+
+    // ✅ Host left but others exist => CANCELLED
+    if (leaving.userId === room.hostUser?.userId) {
       room.status = "CANCELLED";
       room.cancelledReason = "Host left the room";
+      room.endTimeMs = Date.now();
+
+      // also mark draw state
+      room.winner = null;
+      room.isDraw = true;
+      room.drawReason = "HOST_LEFT";
+
       await saveRoom(roomId, room);
       return { cancelled: true, room };
     }
 
+    // ✅ If ACTIVE and someone leaves => FINISH now (winner/draw)
     if (room.status === "ACTIVE") {
       room.status = "FINISHED";
+      room.endTimeMs = Date.now();
 
       const w = computeWinner(room.scores || {});
       room.winner = w.winner;
@@ -253,6 +281,12 @@ export async function cancelRoom(roomId, reason = "Cancelled") {
 
     room.status = "CANCELLED";
     room.cancelledReason = reason;
+    room.endTimeMs = Date.now();
+
+    // mark draw state
+    room.winner = null;
+    room.isDraw = true;
+    room.drawReason = "CANCELLED";
 
     await saveRoom(roomId, room);
     return room;

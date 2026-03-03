@@ -8,7 +8,7 @@ import {
   setPlayerReady,
   leaveRoom,
   updateScore,
-  markSolved,  
+  markSolved,
 } from "../utils/roomManager.js";
 
 import {
@@ -24,6 +24,18 @@ import { judgeProblemSubmission } from "../utils/judgeRunner.js";
 const lobbyTimers = new Map();
 const battleEndTimers = new Map();
 
+/* Track which roomIds this socket joined (so we can leave on disconnect) */
+function ensureSocketRooms(socket) {
+  if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set();
+  return socket.data.joinedRooms;
+}
+function trackJoin(socket, roomId) {
+  ensureSocketRooms(socket).add(roomId);
+}
+function trackLeave(socket, roomId) {
+  ensureSocketRooms(socket).delete(roomId);
+}
+
 function clearLobbyTimer(roomId) {
   const t = lobbyTimers.get(roomId);
   if (t) clearTimeout(t);
@@ -36,7 +48,7 @@ function clearBattleEndTimer(roomId) {
   battleEndTimers.delete(roomId);
 }
 
-/* ---------------- Persist Dedup (avoid saving twice) ---------------- */
+/* ---------------- Persist Dedup ---------------- */
 const persistedRooms = new Set();
 
 function toRoomSnapshot(room) {
@@ -60,8 +72,9 @@ function toRoomSnapshot(room) {
     timerSeconds: Number(room.timerSeconds || 0),
     startTimeMs: Number(room.startTimeMs || 0),
     endTimeMs: Number(room.endTimeMs || 0),
+
     hostUserId: String(room.hostUser?.userId || ""),
-    winnerUserId: String(room.winner || ""),
+    winnerUserId: String(room.winner || ""), // empty => draw
 
     players: players
       .map((p) => ({
@@ -97,9 +110,8 @@ async function persistOnce(room) {
   }
 }
 
-/**
- * ✅ Schedule battle end exactly after timerSeconds (deduped)
- */
+/* ---------------- timers ---------------- */
+
 function scheduleBattleEnd(io, roomId, timerSeconds) {
   clearBattleEndTimer(roomId);
 
@@ -134,19 +146,15 @@ function allReady(room) {
   return room.players.every((p) => room.ready?.[p.userId] === true);
 }
 
-/** ✅ AUTO START LOGIC */
+/** AUTO START when FULL + READY */
 async function tryAutoStart(io, roomId) {
   const room = await getRoom(roomId);
   if (!room) return;
   if (room.status !== "WAITING") return;
 
-  // start ONLY when room is FULL
   if (room.players.length !== room.maxPlayers) return;
-
-  // must be ready
   if (!allReady(room)) return;
 
-  // fetch questions
   const questions = await getRandomProblemsGrpc({
     topic: room.topic,
     count: room.questionCount,
@@ -174,19 +182,12 @@ async function tryAutoStart(io, roomId) {
   scheduleBattleEnd(io, roomId, started.room.timerSeconds);
 }
 
-/**
- * finalizeLobby:
- * lobby ends -> if not FULL -> cancel
- * if FULL but not ready -> cancel
- * if FULL + ready -> start
- */
+/** lobby ends -> cancel if not full or not ready */
 async function finalizeLobby(io, roomId) {
   const room = await getRoom(roomId);
   if (!room) return;
-
   if (room.status !== "WAITING") return;
 
-  // if room not filled -> cancel
   if (room.players.length !== room.maxPlayers) {
     const cancelled = await cancelRoom(roomId, "Room not filled to maxPlayers in time");
     io.to(roomId).emit("room:cancelled", cancelled);
@@ -195,7 +196,6 @@ async function finalizeLobby(io, roomId) {
     return;
   }
 
-  // full but not ready -> cancel
   if (!allReady(room)) {
     const cancelled = await cancelRoom(roomId, "Room full but not all players clicked READY in time");
     io.to(roomId).emit("room:cancelled", cancelled);
@@ -204,7 +204,6 @@ async function finalizeLobby(io, roomId) {
     return;
   }
 
-  // full + ready -> start
   await tryAutoStart(io, roomId);
 }
 
@@ -221,8 +220,9 @@ export function registerBattleSocket(io) {
         const room = await createRoom(user, { topic, questionCount, timerSeconds, maxPlayers });
 
         socket.join(room.roomId);
+        trackJoin(socket, room.roomId);
 
-        cb?.({ ok: true, room }); // ✅ ACK for frontend
+        cb?.({ ok: true, room });
         socket.emit("room:created", room);
 
         io.to(room.roomId).emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
@@ -255,8 +255,9 @@ export function registerBattleSocket(io) {
         }
 
         socket.join(roomId);
+        trackJoin(socket, roomId);
 
-        cb?.({ ok: true, room: res.room }); // ✅ ACK so frontend navigates only if ok
+        cb?.({ ok: true, room: res.room });
 
         io.to(roomId).emit("room:update", res.room);
         socket.emit("lobby:timer", { lobbyClosesAtMs: res.room.lobbyClosesAtMs });
@@ -280,11 +281,10 @@ export function registerBattleSocket(io) {
         if (!room) return cb?.({ ok: false, message: "Room not found" });
 
         socket.join(roomId);
+        trackJoin(socket, roomId);
 
-        // ✅ IMPORTANT: ACK for frontend
         cb?.({ ok: true, room });
 
-        // helpful broadcasts
         socket.emit("room:update", room);
         socket.emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
       } catch (e) {
@@ -292,29 +292,26 @@ export function registerBattleSocket(io) {
       }
     });
 
-    /* ---------------- PROBLEM DETAILS (testcases) ---------------- */
-   // ✅ PROBLEM DETAILS for UI (sample only)
-socket.on("problem:details", async ({ problemId }, cb) => {
-  try {
-    if (!problemId) return cb?.({ ok: false, message: "problemId required" });
+    /* ---------------- PROBLEM DETAILS ---------------- */
+    socket.on("problem:details", async ({ problemId }, cb) => {
+      try {
+        if (!problemId) return cb?.({ ok: false, message: "problemId required" });
 
-    const details = await getProblemDetailsGrpc({
-      problemId,
-      includeHidden: false, // ✅ UI gets only sample
+        const details = await getProblemDetailsGrpc({
+          problemId,
+          includeHidden: false,
+        });
+
+        return cb?.({
+          ok: true,
+          problem: details.problem,
+          testcases: details.testcases || [],
+        });
+      } catch (e) {
+        console.error("[gateway] problem:details error:", e?.message || e);
+        return cb?.({ ok: false, message: e?.message || "GetProblemDetails failed" });
+      }
     });
-
-    console.log("[gateway] problem:details(UI)", problemId, "testcases:", details?.testcases?.length);
-
-    return cb?.({
-      ok: true,
-      problem: details.problem,
-      testcases: details.testcases || [],
-    });
-  } catch (e) {
-    console.error("[gateway] problem:details error:", e?.message || e);
-    return cb?.({ ok: false, message: e?.message || "GetProblemDetails failed" });
-  }
-});
 
     /* ---------------- READY ---------------- */
     socket.on("player:ready", async ({ roomId, ready = true }) => {
@@ -328,7 +325,6 @@ socket.on("problem:details", async ({ problemId }, cb) => {
 
         io.to(roomId).emit("room:update", updated.room);
 
-        // full + allReady => start
         if (updated.room.players.length === updated.room.maxPlayers && allReady(updated.room)) {
           await tryAutoStart(io, roomId);
         }
@@ -337,7 +333,7 @@ socket.on("problem:details", async ({ problemId }, cb) => {
       }
     });
 
-    /* ---------------- LEAVE ---------------- */
+    /* ---------------- LEAVE (Exit button) ---------------- */
     socket.on("room:leave", async ({ roomId }) => {
       try {
         if (!socket.user?.userId) return socket.emit("room:error", "Unauthorized");
@@ -347,24 +343,27 @@ socket.on("problem:details", async ({ problemId }, cb) => {
         const out = await leaveRoom(roomId, userId);
         if (out?.error) return socket.emit("room:error", out.error);
 
-        if (out.cancelled) {
+        // stop timers if ended
+        if (out.cancelled || out.finished || out.room?.status === "FINISHED") {
           clearLobbyTimer(roomId);
           clearBattleEndTimer(roomId);
-
-          io.to(roomId).emit("room:cancelled", out.room);
-          await persistOnce(out.room);
-          return;
         }
 
-        io.to(roomId).emit("room:update", out.room);
-
-        if (out.room?.status === "FINISHED") {
-          io.to(roomId).emit("battle:ended", out.room);
-          io.to(roomId).emit("leaderboard:update", { roomId, scores: out.room.scores });
+        if (out.cancelled) {
+          io.to(roomId).emit("room:cancelled", out.room);
           await persistOnce(out.room);
+        } else {
+          io.to(roomId).emit("room:update", out.room);
+
+          if (out.room?.status === "FINISHED") {
+            io.to(roomId).emit("battle:ended", out.room);
+            io.to(roomId).emit("leaderboard:update", { roomId, scores: out.room.scores });
+            await persistOnce(out.room);
+          }
         }
 
         socket.leave(roomId);
+        trackLeave(socket, roomId);
       } catch (e) {
         socket.emit("room:error", e?.message || "Leave failed");
       }
@@ -388,10 +387,7 @@ socket.on("problem:details", async ({ problemId }, cb) => {
         if (!room) return socket.emit("room:error", "Room not found");
         if (room.status !== "ACTIVE") return socket.emit("room:error", "Battle not active");
 
-        // ✅ support both formats: q.id or q.problemId
-        const allowed = room.questions?.some(
-          (q) => String(q.id ?? q.problemId) === String(problemId)
-        );
+        const allowed = room.questions?.some((q) => String(q.id ?? q.problemId) === String(problemId));
         if (!allowed) return socket.emit("room:error", "Invalid problem for this room");
 
         const result = await judgeProblemSubmission({ problemId, language_id, source_code });
@@ -426,8 +422,6 @@ socket.on("problem:details", async ({ problemId }, cb) => {
             memoryKb: first?.memory ? Number(first.memory) : 0,
             errorMessage: String(result.message || ""),
           });
-
-          console.log("✅ PersistSubmission saved:", { roomId, userId, problemId, verdict: result.verdict });
         } catch (e) {
           console.log("⚠️ PersistSubmission failed:", e?.message || e);
         }
@@ -445,8 +439,40 @@ socket.on("problem:details", async ({ problemId }, cb) => {
       }
     });
 
-    socket.on("disconnect", () => {
+    /* ---------------- DISCONNECT => auto leave all joined rooms ---------------- */
+    socket.on("disconnect", async () => {
       console.log("[gateway] socket disconnected:", socket.id);
+
+      const userId = socket.user?.userId;
+      if (!userId) return;
+
+      const rooms = Array.from(ensureSocketRooms(socket));
+      for (const roomId of rooms) {
+        try {
+          const out = await leaveRoom(roomId, userId);
+
+          if (out?.cancelled || out?.finished || out?.room?.status === "FINISHED") {
+            clearLobbyTimer(roomId);
+            clearBattleEndTimer(roomId);
+          }
+
+          if (out?.cancelled) {
+            io.to(roomId).emit("room:cancelled", out.room);
+            await persistOnce(out.room);
+          } else if (out?.room) {
+            io.to(roomId).emit("room:update", out.room);
+            if (out.room.status === "FINISHED") {
+              io.to(roomId).emit("battle:ended", out.room);
+              io.to(roomId).emit("leaderboard:update", { roomId, scores: out.room.scores });
+              await persistOnce(out.room);
+            }
+          }
+        } catch (e) {
+          console.log("[gateway] disconnect leave failed:", roomId, e?.message || e);
+        } finally {
+          trackLeave(socket, roomId);
+        }
+      }
     });
   });
 }
