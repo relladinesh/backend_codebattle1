@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 
 // ✅ Use ENV in production, fallback to localhost in dev
-const FRONTEND_ORIGIN = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_ORIGIN = process.env.FRONTEND_URL ;
 
 // ✅ Express CORS
 app.use(

@@ -35,6 +35,33 @@ async function withRoomLock(roomId, fn) {
   }
 }
 
+/* =========================
+   ✅ Winner / Draw Logic
+   ========================= */
+function computeWinner(scores = {}) {
+  const entries = Object.entries(scores).map(([uid, sc]) => [uid, Number(sc || 0)]);
+  if (!entries.length) {
+    return { winner: null, isDraw: true, drawReason: "NO_PLAYERS" };
+  }
+
+  // sort high->low
+  entries.sort((a, b) => b[1] - a[1]);
+
+  const topScore = entries[0][1];
+
+  // all 0 => draw
+  if (topScore <= 0) {
+    return { winner: null, isDraw: true, drawReason: "ALL_ZERO" };
+  }
+
+  // tie check: if 2nd score == topScore => draw
+  if (entries.length >= 2 && entries[1][1] === topScore) {
+    return { winner: null, isDraw: true, drawReason: "TIE" };
+  }
+
+  return { winner: entries[0][0], isDraw: false, drawReason: null };
+}
+
 export async function getRoom(roomId) {
   const data = await redis.get(roomKey(roomId));
   return data ? JSON.parse(data) : null;
@@ -72,7 +99,12 @@ export async function createRoom(hostUser, config = {}) {
     questions: [],
     startTimeMs: null,
     endTimeMs: null,
+
+    // ✅ new fields for draw support
     winner: null,
+    isDraw: false,
+    drawReason: null,
+
     cancelledReason: null,
   };
 
@@ -129,6 +161,11 @@ export async function startBattle(roomId, questions) {
     room.startTimeMs = Date.now();
     room.endTimeMs = room.startTimeMs + room.timerSeconds * 1000;
     room.questions = questions || [];
+
+    // reset end state
+    room.winner = null;
+    room.isDraw = false;
+    room.drawReason = null;
 
     room.solved = room.solved || {};
     for (const p of room.players) room.solved[p.userId] = room.solved[p.userId] || {};
@@ -197,8 +234,11 @@ export async function leaveRoom(roomId, userId) {
 
     if (room.status === "ACTIVE") {
       room.status = "FINISHED";
-      const sorted = Object.entries(room.scores || {}).sort((a, b) => b[1] - a[1]);
-      room.winner = sorted.length ? sorted[0][0] : null;
+
+      const w = computeWinner(room.scores || {});
+      room.winner = w.winner;
+      room.isDraw = w.isDraw;
+      room.drawReason = w.drawReason;
     }
 
     await saveRoom(roomId, room);
@@ -231,8 +271,11 @@ export async function checkAndFinish(roomId) {
     if (Date.now() < room.endTimeMs) return null;
 
     room.status = "FINISHED";
-    const sorted = Object.entries(room.scores || {}).sort((a, b) => b[1] - a[1]);
-    room.winner = sorted.length ? sorted[0][0] : null;
+
+    const w = computeWinner(room.scores || {});
+    room.winner = w.winner;
+    room.isDraw = w.isDraw;
+    room.drawReason = w.drawReason;
 
     await saveRoom(roomId, room);
     return room;
