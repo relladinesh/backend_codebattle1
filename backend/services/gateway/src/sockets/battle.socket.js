@@ -146,12 +146,23 @@ function allReady(room) {
   return room.players.every((p) => room.ready?.[p.userId] === true);
 }
 
-/** AUTO START when FULL + READY */
+function minNeed(room) {
+  // ✅ if you store minPlayersToStart in room, use it
+  // else default 2
+  return Number(room?.minPlayersToStart || 2);
+}
+
+function isHost(socket, room) {
+  return !!socket.user?.userId && String(socket.user.userId) === String(room?.hostUser?.userId || "");
+}
+
+/** AUTO START when FULL + READY (optional) */
 async function tryAutoStart(io, roomId) {
   const room = await getRoom(roomId);
   if (!room) return;
   if (room.status !== "WAITING") return;
 
+  // keep your premium rule: only auto start when FULL + ALL READY
   if (room.players.length !== room.maxPlayers) return;
   if (!allReady(room)) return;
 
@@ -162,7 +173,8 @@ async function tryAutoStart(io, roomId) {
 
   if (!questions.length) {
     const cancelled = await cancelRoom(roomId, `No questions found for topic '${room.topic}'`);
-    io.to(roomId).emit("room:cancelled", cancelled);
+    io.to(roomId).emit("room:update", cancelled);
+    io.to(roomId).emit("room:cancelled", cancelled?.cancelledReason || "No questions found");
     await persistOnce(cancelled);
     clearLobbyTimer(roomId);
     return;
@@ -176,34 +188,39 @@ async function tryAutoStart(io, roomId) {
 
   clearLobbyTimer(roomId);
 
+  io.to(roomId).emit("room:update", started.room);
   io.to(roomId).emit("battle:started", started.room);
   io.to(roomId).emit("leaderboard:update", { roomId, scores: started.room.scores });
 
   scheduleBattleEnd(io, roomId, started.room.timerSeconds);
 }
 
-/** lobby ends -> cancel if not full or not ready */
+/**
+ * ✅ LOBBY END RULE (UPDATED):
+ * - if players < minPlayersToStart => CANCELLED with message "Room requires minimum X players"
+ * - else do NOT cancel (host can still start manually)
+ */
 async function finalizeLobby(io, roomId) {
   const room = await getRoom(roomId);
   if (!room) return;
   if (room.status !== "WAITING") return;
 
-  if (room.players.length !== room.maxPlayers) {
-    const cancelled = await cancelRoom(roomId, "Room not filled to maxPlayers in time");
-    io.to(roomId).emit("room:cancelled", cancelled);
+  const count = Number(room.players?.length || 0);
+  const need = minNeed(room);
+
+  if (count < need) {
+    const cancelled = await cancelRoom(roomId, `Room requires minimum ${need} players`);
+    io.to(roomId).emit("room:update", cancelled);
+    io.to(roomId).emit("room:cancelled", cancelled?.cancelledReason || `Room requires minimum ${need} players`);
     await persistOnce(cancelled);
     clearLobbyTimer(roomId);
     return;
   }
 
-  if (!allReady(room)) {
-    const cancelled = await cancelRoom(roomId, "Room full but not all players clicked READY in time");
-    io.to(roomId).emit("room:cancelled", cancelled);
-    await persistOnce(cancelled);
-    clearLobbyTimer(roomId);
-    return;
-  }
+  // ✅ lobby ended but min players met -> keep waiting
+  io.to(roomId).emit("room:update", room);
 
+  // optional: if it's already full+ready, auto start
   await tryAutoStart(io, roomId);
 }
 
@@ -262,6 +279,7 @@ export function registerBattleSocket(io) {
         io.to(roomId).emit("room:update", res.room);
         socket.emit("lobby:timer", { lobbyClosesAtMs: res.room.lobbyClosesAtMs });
 
+        // if full, auto-start check
         if (res.room.players.length === res.room.maxPlayers) {
           io.to(roomId).emit("room:full", res.room);
           await tryAutoStart(io, roomId);
@@ -287,8 +305,67 @@ export function registerBattleSocket(io) {
 
         socket.emit("room:update", room);
         socket.emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
+
+        // if already ACTIVE, help frontend
+        if (String(room.status || "").toUpperCase() === "ACTIVE") {
+          socket.emit("battle:started", room);
+        }
       } catch (e) {
         cb?.({ ok: false, message: e?.message || "Failed to load room" });
+      }
+    });
+
+    /* ---------------- HOST MANUAL START (NEW) ---------------- */
+    socket.on("battle:start", async ({ roomId }, cb) => {
+      try {
+        if (!socket.user?.userId) return cb?.({ ok: false, message: "Unauthorized" });
+
+        const room = await getRoom(roomId);
+        if (!room) return cb?.({ ok: false, message: "Room not found" });
+
+        if (String(room.status || "").toUpperCase() !== "WAITING") {
+          return cb?.({ ok: false, message: "Room already started/finished" });
+        }
+
+        if (!isHost(socket, room)) {
+          return cb?.({ ok: false, message: "Only host can start" });
+        }
+
+        const count = Number(room.players?.length || 0);
+        const need = minNeed(room);
+
+        if (count < need) {
+          return cb?.({ ok: false, message: `Room requires minimum ${need} players` });
+        }
+
+        const questions = await getRandomProblemsGrpc({
+          topic: room.topic,
+          count: room.questionCount,
+        });
+
+        if (!questions.length) {
+          const cancelled = await cancelRoom(roomId, `No questions found for topic '${room.topic}'`);
+          io.to(roomId).emit("room:update", cancelled);
+          io.to(roomId).emit("room:cancelled", cancelled?.cancelledReason || "No questions found");
+          await persistOnce(cancelled);
+          clearLobbyTimer(roomId);
+          return cb?.({ ok: false, message: cancelled?.cancelledReason || "No questions found" });
+        }
+
+        const started = await startBattle(roomId, questions);
+        if (started?.error) return cb?.({ ok: false, message: started.error });
+
+        clearLobbyTimer(roomId);
+
+        io.to(roomId).emit("room:update", started.room);
+        io.to(roomId).emit("battle:started", started.room);
+        io.to(roomId).emit("leaderboard:update", { roomId, scores: started.room.scores });
+
+        scheduleBattleEnd(io, roomId, started.room.timerSeconds);
+
+        cb?.({ ok: true, room: started.room });
+      } catch (e) {
+        cb?.({ ok: false, message: e?.message || "Start failed" });
       }
     });
 
@@ -325,6 +402,7 @@ export function registerBattleSocket(io) {
 
         io.to(roomId).emit("room:update", updated.room);
 
+        // ✅ still allow auto-start if full+ready (premium)
         if (updated.room.players.length === updated.room.maxPlayers && allReady(updated.room)) {
           await tryAutoStart(io, roomId);
         }
@@ -350,7 +428,8 @@ export function registerBattleSocket(io) {
         }
 
         if (out.cancelled) {
-          io.to(roomId).emit("room:cancelled", out.room);
+          io.to(roomId).emit("room:update", out.room);
+          io.to(roomId).emit("room:cancelled", out.room?.cancelledReason || "Room cancelled");
           await persistOnce(out.room);
         } else {
           io.to(roomId).emit("room:update", out.room);
@@ -457,7 +536,8 @@ export function registerBattleSocket(io) {
           }
 
           if (out?.cancelled) {
-            io.to(roomId).emit("room:cancelled", out.room);
+            io.to(roomId).emit("room:update", out.room);
+            io.to(roomId).emit("room:cancelled", out.room?.cancelledReason || "Room cancelled");
             await persistOnce(out.room);
           } else if (out?.room) {
             io.to(roomId).emit("room:update", out.room);

@@ -2,10 +2,8 @@ import crypto from "crypto";
 import { redis } from "../config/redis.js";
 import { roomKey, roomLockKey } from "./roomKeys.js";
 
-const ROOM_TTL = 7200;
-const LOBBY_OPEN_MS = 2 * 60 * 1000;
-const MIN_PLAYERS_TO_START = 2;
-
+const ROOM_TTL = 7200; // 2 hours
+const LOBBY_OPEN_MS = 2 * 60 * 1000; // 2 minutes
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function withRoomLock(roomId, fn) {
@@ -40,21 +38,15 @@ async function withRoomLock(roomId, fn) {
    ========================= */
 function computeWinner(scores = {}) {
   const entries = Object.entries(scores).map(([uid, sc]) => [uid, Number(sc || 0)]);
-  if (!entries.length) {
-    return { winner: null, isDraw: true, drawReason: "NO_PLAYERS" };
-  }
+  if (!entries.length) return { winner: null, isDraw: true, drawReason: "NO_PLAYERS" };
 
   entries.sort((a, b) => b[1] - a[1]);
   const topScore = entries[0][1];
 
-  if (topScore <= 0) {
-    return { winner: null, isDraw: true, drawReason: "ALL_ZERO" };
-  }
+  if (topScore <= 0) return { winner: null, isDraw: true, drawReason: "ALL_ZERO" };
 
   const tied = entries.filter(([, sc]) => sc === topScore).length;
-  if (tied > 1) {
-    return { winner: null, isDraw: true, drawReason: "TIE" };
-  }
+  if (tied > 1) return { winner: null, isDraw: true, drawReason: "TIE" };
 
   return { winner: entries[0][0], isDraw: false, drawReason: null };
 }
@@ -68,11 +60,19 @@ async function saveRoom(roomId, room) {
   await redis.set(roomKey(roomId), JSON.stringify(room), "EX", ROOM_TTL);
 }
 
+/* =========================
+   ✅ CREATE ROOM (updated)
+   - minPlayersToStart:
+     if maxPlayers=2 => 2
+     if maxPlayers>=3 => 2 (host can start with 2 joined)
+   ========================= */
 export async function createRoom(hostUser, config = {}) {
   const roomId = crypto.randomBytes(3).toString("hex");
 
   const maxPlayers = Number(config.maxPlayers ?? 2);
   if (maxPlayers < 2 || maxPlayers > 10) throw new Error("maxPlayers must be between 2 and 10");
+
+  const minPlayersToStart = maxPlayers === 2 ? 2 : 2; // (your rule) always 2, but keep explicit
 
   const room = {
     roomId,
@@ -91,13 +91,12 @@ export async function createRoom(hostUser, config = {}) {
     timerSeconds: Number(config.timerSeconds || 0),
 
     maxPlayers,
-    minPlayersToStart: MIN_PLAYERS_TO_START,
+    minPlayersToStart, // ✅ NEW
 
     questions: [],
     startTimeMs: null,
     endTimeMs: null,
 
-    // ✅ draw fields
     winner: null,
     isDraw: false,
     drawReason: null,
@@ -113,8 +112,15 @@ export async function joinRoom(roomId, user) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
+
+    // ✅ if lobby time over, cancel if min players not met
+    if (room.status === "WAITING" && Date.now() > room.lobbyClosesAtMs) {
+      const cancelled = await cancelIfMinPlayersNotMet(roomId);
+      if (cancelled) return { error: cancelled.cancelledReason || "Lobby time over" };
+      // if not cancelled, means min players met, but still WAITING -> ok
+    }
+
     if (room.status !== "WAITING") return { error: "Already started" };
-    if (Date.now() > room.lobbyClosesAtMs) return { error: "Lobby time over" };
     if (room.players.length >= room.maxPlayers) return { error: "Room full" };
 
     const exists = room.players.some((p) => p.userId === user.userId);
@@ -139,6 +145,12 @@ export async function setPlayerReady(roomId, userId, ready) {
     if (!room) return { error: "Room not found" };
     if (room.status !== "WAITING") return { error: "Room is not in lobby" };
 
+    // ✅ lobby time over => cancel if min not met
+    if (Date.now() > room.lobbyClosesAtMs) {
+      const cancelled = await cancelIfMinPlayersNotMet(roomId);
+      if (cancelled) return { error: cancelled.cancelledReason || "Lobby time over" };
+    }
+
     const isPlayer = room.players.some((p) => p.userId === userId);
     if (!isPlayer) return { error: "User not in room" };
 
@@ -150,18 +162,70 @@ export async function setPlayerReady(roomId, userId, ready) {
   });
 }
 
-export async function startBattle(roomId, questions) {
+/* =========================
+   ✅ AUTO CANCEL if min players not met when lobby ends
+   ========================= */
+export async function cancelIfMinPlayersNotMet(roomId) {
+  return withRoomLock(roomId, async () => {
+    const room = await getRoom(roomId);
+    if (!room) return null;
+    if (room.status !== "WAITING") return null;
+
+    // lobby not ended yet
+    if (Date.now() <= room.lobbyClosesAtMs) return null;
+
+    const count = room.players?.length || 0;
+    const minNeed = Number(room.minPlayersToStart || 2);
+
+    if (count < minNeed) {
+      room.status = "CANCELLED";
+      room.cancelledReason = `Room requires minimum ${minNeed} players`;
+      room.endTimeMs = Date.now();
+
+      room.winner = null;
+      room.isDraw = true;
+      room.drawReason = "MIN_PLAYERS_NOT_MET";
+
+      await saveRoom(roomId, room);
+      return room;
+    }
+
+    return null;
+  });
+}
+
+/* =========================
+   ✅ START BATTLE (Host Only + Min Players)
+   ========================= */
+export async function startBattle(roomId, questions, requesterUserId) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
     if (room.status !== "WAITING") return { error: "Room already active/finished" };
+
+    // ✅ lobby time over => cancel if min not met
+    if (Date.now() > room.lobbyClosesAtMs) {
+      const cancelled = await cancelIfMinPlayersNotMet(roomId);
+      if (cancelled) return { error: cancelled.cancelledReason || "Lobby time over" };
+    }
+
+    // ✅ host-only start
+    if (requesterUserId !== room.hostUser?.userId) {
+      return { error: "Only host can start" };
+    }
+
+    // ✅ min players check (your rule)
+    const count = room.players?.length || 0;
+    const minNeed = Number(room.minPlayersToStart || 2);
+    if (count < minNeed) {
+      return { error: `Room requires minimum ${minNeed} players` };
+    }
 
     room.status = "ACTIVE";
     room.startTimeMs = Date.now();
     room.endTimeMs = room.startTimeMs + room.timerSeconds * 1000;
     room.questions = questions || [];
 
-    // reset end state
     room.winner = null;
     room.isDraw = false;
     room.drawReason = null;
@@ -182,12 +246,10 @@ export async function markSolved(roomId, userId, problemId) {
 
     room.solved = room.solved || {};
     room.solved[userId] = room.solved[userId] || {};
-
     if (room.solved[userId][problemId] === true) return { alreadySolved: true, room };
 
     room.solved[userId][problemId] = true;
     await saveRoom(roomId, room);
-
     return { alreadySolved: false, room };
   });
 }
@@ -210,8 +272,8 @@ export async function updateScore(roomId, userId, delta) {
 }
 
 /**
- * ✅ LEAVE RULES (what you asked):
- * - If last person leaves => FINISHED (and draw/no winner)
+ * ✅ LEAVE RULES:
+ * - If last person leaves => FINISHED (draw)
  * - If host leaves while others exist => CANCELLED
  * - If someone leaves during ACTIVE => FINISHED (winner/draw computed)
  */
@@ -230,39 +292,30 @@ export async function leaveRoom(roomId, userId) {
     if (room.scores) delete room.scores[userId];
     if (room.solved) delete room.solved[userId];
 
-    // ✅ If nobody left => FINISH + DRAW (important for history)
     if (room.players.length === 0) {
       room.status = "FINISHED";
       room.endTimeMs = Date.now();
-
       room.winner = null;
       room.isDraw = true;
       room.drawReason = "NO_PLAYERS";
-
       await saveRoom(roomId, room);
       return { finished: true, room };
     }
 
-    // ✅ Host left but others exist => CANCELLED
     if (leaving.userId === room.hostUser?.userId) {
       room.status = "CANCELLED";
       room.cancelledReason = "Host left the room";
       room.endTimeMs = Date.now();
-
-      // also mark draw state
       room.winner = null;
       room.isDraw = true;
       room.drawReason = "HOST_LEFT";
-
       await saveRoom(roomId, room);
       return { cancelled: true, room };
     }
 
-    // ✅ If ACTIVE and someone leaves => FINISH now (winner/draw)
     if (room.status === "ACTIVE") {
       room.status = "FINISHED";
       room.endTimeMs = Date.now();
-
       const w = computeWinner(room.scores || {});
       room.winner = w.winner;
       room.isDraw = w.isDraw;
@@ -282,8 +335,6 @@ export async function cancelRoom(roomId, reason = "Cancelled") {
     room.status = "CANCELLED";
     room.cancelledReason = reason;
     room.endTimeMs = Date.now();
-
-    // mark draw state
     room.winner = null;
     room.isDraw = true;
     room.drawReason = "CANCELLED";
@@ -305,7 +356,6 @@ export async function checkAndFinish(roomId) {
     if (Date.now() < room.endTimeMs) return null;
 
     room.status = "FINISHED";
-
     const w = computeWinner(room.scores || {});
     room.winner = w.winner;
     room.isDraw = w.isDraw;
