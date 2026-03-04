@@ -36,7 +36,7 @@ async function withRoomLock(roomId, fn) {
 }
 
 /* =========================
-   ✅ Winner / Draw Logic
+   Winner / Draw Logic
    ========================= */
 function computeWinner(scores = {}) {
   const entries = Object.entries(scores).map(([uid, sc]) => [uid, Number(sc || 0)]);
@@ -63,44 +63,29 @@ async function saveRoom(roomId, room) {
 }
 
 /* =========================
-   ✅ Lobby-end behavior
-   - Host can keep waiting after timer ends
-   - Never cancel just because timer ended
-   - Cancel only if room becomes EMPTY after lobby end
+   ✅ NEW: Lobby expiry rule (as you asked now)
+   - When lobby timer ends and still WAITING => CANCELLED
    ========================= */
-function cancelIfEmptyAfterLobbyInLock(room) {
+function cancelIfLobbyExpiredInLock(room) {
   if (!room) return null;
   if (room.status !== "WAITING") return null;
 
-  // lobby not ended yet -> do nothing
-  if (Date.now() <= Number(room.lobbyClosesAtMs || 0)) return null;
+  const closesAt = Number(room.lobbyClosesAtMs || 0);
+  if (!closesAt) return null;
 
-  const count = Number(room.players?.length || 0);
-
-  // keep room alive if anyone is inside
-  if (count >= 1) return null;
+  if (Date.now() < closesAt) return null;
 
   room.status = "CANCELLED";
-  room.cancelledReason = "Room ended (no players)";
+  room.cancelledReason = "Lobby timed out";
   room.endTimeMs = Date.now();
   room.winner = null;
   room.isDraw = true;
-  room.drawReason = "NO_PLAYERS";
-
+  room.drawReason = "LOBBY_TIMEOUT";
   return room;
 }
 
 /* =========================
-   ✅ Helper: Can Start
-   ========================= */
-function canStartBattle(room) {
-  const count = Number(room?.players?.length || 0);
-  const need = Number(room?.minPlayersToStart || 2);
-  return count >= need;
-}
-
-/* =========================
-   ✅ CREATE ROOM
+   CREATE ROOM
    ========================= */
 export async function createRoom(hostUser, config = {}) {
   const roomId = crypto.randomBytes(3).toString("hex");
@@ -118,7 +103,6 @@ export async function createRoom(hostUser, config = {}) {
 
     hostUser,
     players: [hostUser],
-
     scores: { [hostUser.userId]: 0 },
     ready: { [hostUser.userId]: false },
     solved: {},
@@ -128,7 +112,9 @@ export async function createRoom(hostUser, config = {}) {
     timerSeconds: Number(config.timerSeconds || 0),
 
     maxPlayers,
-    minPlayersToStart: 2, // ✅ your rule
+
+    // you want minimum 2 to start
+    minPlayersToStart: 2,
 
     questions: [],
     startTimeMs: null,
@@ -146,23 +132,23 @@ export async function createRoom(hostUser, config = {}) {
 }
 
 /* =========================
-   ✅ JOIN ROOM
+   JOIN ROOM
    ========================= */
 export async function joinRoom(roomId, user) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
 
-    const cancelled = cancelIfEmptyAfterLobbyInLock(room);
+    const cancelled = cancelIfLobbyExpiredInLock(room);
     if (cancelled) {
       await saveRoom(roomId, cancelled);
       return { error: cancelled.cancelledReason, room: cancelled };
     }
 
     if (room.status !== "WAITING") return { error: "Already started" };
-    if (Number(room.players?.length || 0) >= Number(room.maxPlayers || 0)) return { error: "Room full" };
+    if (room.players.length >= room.maxPlayers) return { error: "Room full" };
 
-    const exists = room.players.some((p) => String(p.userId) === String(user.userId));
+    const exists = room.players.some((p) => p.userId === user.userId);
     if (!exists) {
       room.players.push(user);
 
@@ -179,14 +165,14 @@ export async function joinRoom(roomId, user) {
 }
 
 /* =========================
-   ✅ READY
+   READY
    ========================= */
 export async function setPlayerReady(roomId, userId, ready) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
 
-    const cancelled = cancelIfEmptyAfterLobbyInLock(room);
+    const cancelled = cancelIfLobbyExpiredInLock(room);
     if (cancelled) {
       await saveRoom(roomId, cancelled);
       return { error: cancelled.cancelledReason, room: cancelled };
@@ -194,7 +180,7 @@ export async function setPlayerReady(roomId, userId, ready) {
 
     if (room.status !== "WAITING") return { error: "Room is not in lobby" };
 
-    const isPlayer = room.players.some((p) => String(p.userId) === String(userId));
+    const isPlayer = room.players.some((p) => p.userId === userId);
     if (!isPlayer) return { error: "User not in room" };
 
     room.ready = room.ready || {};
@@ -206,14 +192,15 @@ export async function setPlayerReady(roomId, userId, ready) {
 }
 
 /* =========================
-   ✅ START BATTLE (host-only + min players)
+   START BATTLE (host-only)
+   - must be called with requesterUserId
    ========================= */
 export async function startBattle(roomId, questions, requesterUserId) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
 
-    const cancelled = cancelIfEmptyAfterLobbyInLock(room);
+    const cancelled = cancelIfLobbyExpiredInLock(room);
     if (cancelled) {
       await saveRoom(roomId, cancelled);
       return { error: cancelled.cancelledReason, room: cancelled };
@@ -221,30 +208,25 @@ export async function startBattle(roomId, questions, requesterUserId) {
 
     if (room.status !== "WAITING") return { error: "Room already active/finished" };
 
-    // ✅ host-only manual start (also used by auto-start by passing hostId)
-    const hostId = String(room.hostUser?.userId || "");
-    if (String(requesterUserId || "") !== hostId) {
+    if (String(requesterUserId) !== String(room.hostUser?.userId || "")) {
       return { error: "Only host can start" };
     }
 
-    // ✅ min players rule
-    if (!canStartBattle(room)) {
-      const need = Number(room.minPlayersToStart || 2);
-      return { error: `Room requires minimum ${need} players` };
-    }
+    const count = Number(room.players?.length || 0);
+    const need = Number(room.minPlayersToStart || 2);
+    if (count < need) return { error: `Room requires minimum ${need} players` };
 
     room.status = "ACTIVE";
     room.startTimeMs = Date.now();
     room.endTimeMs = room.startTimeMs + Number(room.timerSeconds || 0) * 1000;
-
-    room.questions = Array.isArray(questions) ? questions : [];
+    room.questions = questions || [];
 
     room.winner = null;
     room.isDraw = false;
     room.drawReason = null;
 
     room.solved = room.solved || {};
-    for (const p of room.players || []) {
+    for (const p of room.players) {
       room.solved[p.userId] = room.solved[p.userId] || {};
     }
 
@@ -254,7 +236,7 @@ export async function startBattle(roomId, questions, requesterUserId) {
 }
 
 /* =========================
-   ✅ SOLVED
+   SOLVED
    ========================= */
 export async function markSolved(roomId, userId, problemId) {
   return withRoomLock(roomId, async () => {
@@ -273,7 +255,7 @@ export async function markSolved(roomId, userId, problemId) {
 }
 
 /* =========================
-   ✅ SCORE
+   SCORE
    ========================= */
 export async function updateScore(roomId, userId, delta) {
   return withRoomLock(roomId, async () => {
@@ -281,7 +263,7 @@ export async function updateScore(roomId, userId, delta) {
     if (!room) return { error: "Room not found" };
     if (room.status !== "ACTIVE") return { error: "Room not active" };
 
-    const exists = room.players.some((p) => String(p.userId) === String(userId));
+    const exists = room.players.some((p) => p.userId === userId);
     if (!exists) return { error: "User not in room" };
 
     room.scores = room.scores || {};
@@ -293,14 +275,14 @@ export async function updateScore(roomId, userId, delta) {
 }
 
 /* =========================
-   ✅ LEAVE
+   LEAVE
    ========================= */
 export async function leaveRoom(roomId, userId) {
   return withRoomLock(roomId, async () => {
     const room = await getRoom(roomId);
     if (!room) return { error: "Room not found" };
 
-    const idx = room.players.findIndex((p) => String(p.userId) === String(userId));
+    const idx = room.players.findIndex((p) => p.userId === userId);
     if (idx === -1) return { error: "User not in room" };
 
     const leaving = room.players[idx];
@@ -320,8 +302,7 @@ export async function leaveRoom(roomId, userId) {
       return { finished: true, room };
     }
 
-    // host leaves => cancel if others still in
-    if (String(leaving.userId) === String(room.hostUser?.userId || "")) {
+    if (leaving.userId === room.hostUser?.userId) {
       room.status = "CANCELLED";
       room.cancelledReason = "Host left the room";
       room.endTimeMs = Date.now();
@@ -332,7 +313,6 @@ export async function leaveRoom(roomId, userId) {
       return { cancelled: true, room };
     }
 
-    // player leaves during active => finish now
     if (room.status === "ACTIVE") {
       room.status = "FINISHED";
       room.endTimeMs = Date.now();
@@ -348,7 +328,7 @@ export async function leaveRoom(roomId, userId) {
 }
 
 /* =========================
-   ✅ CANCEL
+   CANCEL
    ========================= */
 export async function cancelRoom(roomId, reason = "Cancelled") {
   return withRoomLock(roomId, async () => {
@@ -368,7 +348,7 @@ export async function cancelRoom(roomId, reason = "Cancelled") {
 }
 
 /* =========================
-   ✅ AUTO FINISH (timer)
+   AUTO FINISH (timer)
    ========================= */
 export async function checkAndFinish(roomId) {
   return withRoomLock(roomId, async () => {
@@ -376,7 +356,8 @@ export async function checkAndFinish(roomId) {
     if (!room || room.status !== "ACTIVE") return null;
 
     if (!room.endTimeMs) {
-      room.endTimeMs = (room.startTimeMs || Date.now()) + Number(room.timerSeconds || 0) * 1000;
+      room.endTimeMs =
+        (room.startTimeMs || Date.now()) + Number(room.timerSeconds || 0) * 1000;
     }
 
     if (Date.now() < room.endTimeMs) return null;
