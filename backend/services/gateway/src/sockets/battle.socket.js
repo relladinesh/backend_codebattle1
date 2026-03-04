@@ -140,31 +140,28 @@ function scheduleBattleEnd(io, roomId, timerSeconds) {
   battleEndTimers.set(roomId, timeoutId);
 }
 
-/** helper: everyone ready */
-function allReady(room) {
-  if (!room?.players?.length) return false;
-  return room.players.every((p) => room.ready?.[p.userId] === true);
-}
-
 function minNeed(room) {
-  // ✅ if you store minPlayersToStart in room, use it
-  // else default 2
   return Number(room?.minPlayersToStart || 2);
 }
 
 function isHost(socket, room) {
-  return !!socket.user?.userId && String(socket.user.userId) === String(room?.hostUser?.userId || "");
+  return (
+    !!socket.user?.userId &&
+    String(socket.user.userId) === String(room?.hostUser?.userId || "")
+  );
 }
 
-/** AUTO START when FULL + READY (optional) */
+/**
+ * ✅ AUTO START RULE (UPDATED AS PER YOUR REQUIREMENT):
+ * - if players === maxPlayers => start immediately
+ * - NO READY CHECK
+ */
 async function tryAutoStart(io, roomId) {
   const room = await getRoom(roomId);
   if (!room) return;
   if (room.status !== "WAITING") return;
 
-  // keep your premium rule: only auto start when FULL + ALL READY
-  if (room.players.length !== room.maxPlayers) return;
-  if (!allReady(room)) return;
+  if (Number(room.players?.length || 0) !== Number(room.maxPlayers || 0)) return;
 
   const questions = await getRandomProblemsGrpc({
     topic: room.topic,
@@ -180,7 +177,9 @@ async function tryAutoStart(io, roomId) {
     return;
   }
 
-  const started = await startBattle(roomId, questions);
+  // ✅ IMPORTANT: pass hostUserId to satisfy roomManager host-check
+  const started = await startBattle(roomId, questions, room.hostUser?.userId);
+
   if (started?.error) {
     io.to(roomId).emit("room:error", started.error);
     return;
@@ -196,9 +195,9 @@ async function tryAutoStart(io, roomId) {
 }
 
 /**
- * ✅ LOBBY END RULE (UPDATED):
- * - if players < minPlayersToStart => CANCELLED with message "Room requires minimum X players"
- * - else do NOT cancel (host can still start manually)
+ * Lobby timer end:
+ * - If players < min => don't cancel, just keep waiting (as you wanted)
+ * - If already full => auto-start
  */
 async function finalizeLobby(io, roomId) {
   const room = await getRoom(roomId);
@@ -208,30 +207,15 @@ async function finalizeLobby(io, roomId) {
   const count = Number(room.players?.length || 0);
   const need = minNeed(room);
 
-  // ✅ DON'T CANCEL when only host is waiting
-  // Just keep the room in WAITING state.
+  io.to(roomId).emit("room:update", room);
+
   if (count < need) {
-    io.to(roomId).emit("room:update", room);
-
-    // Optional: tell host why it didn't start
-    io.to(roomId).emit(
-      "room:info",
-      `Waiting for more players (${count}/${need}). Share the room code.`
-    );
-
-    // ✅ Optional: extend lobby timer so UI doesn't go negative
-    // room.lobbyClosesAtMs = Date.now() + 2 * 60 * 1000; // +2 mins
-    // await saveRoom(roomId, room); // if you expose saveRoom
-    // io.to(roomId).emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
-
+    io.to(roomId).emit("room:info", `Waiting for more players (${count}/${need}).`);
     clearLobbyTimer(roomId);
     return;
   }
 
-  // ✅ lobby ended but min players met -> keep waiting
-  io.to(roomId).emit("room:update", room);
-
-  // optional: if it's already full+ready, auto start
+  // If it became full near lobby end, auto-start
   await tryAutoStart(io, roomId);
 }
 
@@ -290,8 +274,8 @@ export function registerBattleSocket(io) {
         io.to(roomId).emit("room:update", res.room);
         socket.emit("lobby:timer", { lobbyClosesAtMs: res.room.lobbyClosesAtMs });
 
-        // if full, auto-start check
-        if (res.room.players.length === res.room.maxPlayers) {
+        // ✅ if full => auto-start now
+        if (Number(res.room.players?.length || 0) === Number(res.room.maxPlayers || 0)) {
           io.to(roomId).emit("room:full", res.room);
           await tryAutoStart(io, roomId);
         }
@@ -301,36 +285,41 @@ export function registerBattleSocket(io) {
       }
     });
 
-    /* ---------------- GET ROOM STATE (refresh/new tab) ---------------- */
+    /* ---------------- GET ROOM STATE ---------------- */
     socket.on("room:get", async ({ roomId }, cb) => {
-  try {
-    if (!socket.user?.userId)
-      return cb?.({ ok: false, message: "Unauthorized" });
+      try {
+        if (!socket.user?.userId) return cb?.({ ok: false, message: "Unauthorized" });
 
-    const room = await getRoom(roomId);
-    if (!room) return cb?.({ ok: false, message: "Room not found" });
+        const room = await getRoom(roomId);
+        if (!room) return cb?.({ ok: false, message: "Room not found" });
 
-    socket.join(roomId);
-    trackJoin(socket, roomId);
+        socket.join(roomId);
+        trackJoin(socket, roomId);
 
-    cb?.({ ok: true, room });
+        cb?.({ ok: true, room });
 
-    // 🔥 update everyone
-    io.to(roomId).emit("room:update", room);
+        // send room to everyone (so lists update)
+        io.to(roomId).emit("room:update", room);
 
-    socket.emit("lobby:timer", {
-      lobbyClosesAtMs: room.lobbyClosesAtMs,
+        socket.emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
+
+        // if active already
+        if (String(room.status || "").toUpperCase() === "ACTIVE") {
+          socket.emit("battle:started", room);
+        }
+
+        // if full while waiting, auto-start
+        if (String(room.status || "").toUpperCase() === "WAITING") {
+          if (Number(room.players?.length || 0) === Number(room.maxPlayers || 0)) {
+            await tryAutoStart(io, roomId);
+          }
+        }
+      } catch (e) {
+        cb?.({ ok: false, message: e?.message || "Failed to load room" });
+      }
     });
 
-    if (String(room.status || "").toUpperCase() === "ACTIVE") {
-      socket.emit("battle:started", room);
-    }
-  } catch (e) {
-    cb?.({ ok: false, message: e?.message || "Failed to load room" });
-  }
-});
-
-    /* ---------------- HOST MANUAL START (NEW) ---------------- */
+    /* ---------------- HOST MANUAL START ---------------- */
     socket.on("battle:start", async ({ roomId }, cb) => {
       try {
         if (!socket.user?.userId) return cb?.({ ok: false, message: "Unauthorized" });
@@ -349,8 +338,15 @@ export function registerBattleSocket(io) {
         const count = Number(room.players?.length || 0);
         const need = minNeed(room);
 
+        // ✅ only allow host start when min <= players < max
         if (count < need) {
           return cb?.({ ok: false, message: `Room requires minimum ${need} players` });
+        }
+        if (count >= Number(room.maxPlayers || 0)) {
+          // already full => auto-start path will handle; still allow start
+          // but we can just run auto-start logic:
+          await tryAutoStart(io, roomId);
+          return cb?.({ ok: true, message: "Starting..." });
         }
 
         const questions = await getRandomProblemsGrpc({
@@ -367,7 +363,8 @@ export function registerBattleSocket(io) {
           return cb?.({ ok: false, message: cancelled?.cancelledReason || "No questions found" });
         }
 
-        const started = await startBattle(roomId, questions);
+        // ✅ IMPORTANT: pass requesterUserId = host id
+        const started = await startBattle(roomId, questions, socket.user.userId);
         if (started?.error) return cb?.({ ok: false, message: started.error });
 
         clearLobbyTimer(roomId);
@@ -394,31 +391,26 @@ export function registerBattleSocket(io) {
           includeHidden: false,
         });
 
-        return cb?.({
-          ok: true,
-          problem: details.problem,
-          testcases: details.testcases || [],
-        });
+        return cb?.({ ok: true, problem: details.problem, testcases: details.testcases || [] });
       } catch (e) {
         console.error("[gateway] problem:details error:", e?.message || e);
         return cb?.({ ok: false, message: e?.message || "GetProblemDetails failed" });
       }
     });
 
-    /* ---------------- READY ---------------- */
+    /* ---------------- READY (still allowed, but not used for auto-start now) ---------------- */
     socket.on("player:ready", async ({ roomId, ready = true }) => {
       try {
         if (!socket.user?.userId) return socket.emit("room:error", "Unauthorized");
 
         const userId = socket.user.userId;
-
         const updated = await setPlayerReady(roomId, userId, !!ready);
         if (updated?.error) return socket.emit("room:error", updated.error);
 
         io.to(roomId).emit("room:update", updated.room);
 
-        // ✅ still allow auto-start if full+ready (premium)
-        if (updated.room.players.length === updated.room.maxPlayers && allReady(updated.room)) {
+        // ✅ auto-start only by FULL now
+        if (Number(updated.room.players?.length || 0) === Number(updated.room.maxPlayers || 0)) {
           await tryAutoStart(io, roomId);
         }
       } catch (e) {
@@ -426,17 +418,15 @@ export function registerBattleSocket(io) {
       }
     });
 
-    /* ---------------- LEAVE (Exit button) ---------------- */
+    /* ---------------- LEAVE ---------------- */
     socket.on("room:leave", async ({ roomId }) => {
       try {
         if (!socket.user?.userId) return socket.emit("room:error", "Unauthorized");
 
         const userId = socket.user.userId;
-
         const out = await leaveRoom(roomId, userId);
         if (out?.error) return socket.emit("room:error", out.error);
 
-        // stop timers if ended
         if (out.cancelled || out.finished || out.room?.status === "FINISHED") {
           clearLobbyTimer(roomId);
           clearBattleEndTimer(roomId);
@@ -448,7 +438,6 @@ export function registerBattleSocket(io) {
           await persistOnce(out.room);
         } else {
           io.to(roomId).emit("room:update", out.room);
-
           if (out.room?.status === "FINISHED") {
             io.to(roomId).emit("battle:ended", out.room);
             io.to(roomId).emit("leaderboard:update", { roomId, scores: out.room.scores });
@@ -481,7 +470,9 @@ export function registerBattleSocket(io) {
         if (!room) return socket.emit("room:error", "Room not found");
         if (room.status !== "ACTIVE") return socket.emit("room:error", "Battle not active");
 
-        const allowed = room.questions?.some((q) => String(q.id ?? q.problemId) === String(problemId));
+        const allowed = room.questions?.some(
+          (q) => String(q.id ?? q.problemId) === String(problemId)
+        );
         if (!allowed) return socket.emit("room:error", "Invalid problem for this room");
 
         const result = await judgeProblemSubmission({ problemId, language_id, source_code });
@@ -502,7 +493,8 @@ export function registerBattleSocket(io) {
 
         // persist submission
         try {
-          const first = Array.isArray(result.results) && result.results.length ? result.results[0] : null;
+          const first =
+            Array.isArray(result.results) && result.results.length ? result.results[0] : null;
 
           await persistSubmissionGrpc({
             roomId,
@@ -533,7 +525,7 @@ export function registerBattleSocket(io) {
       }
     });
 
-    /* ---------------- DISCONNECT => auto leave all joined rooms ---------------- */
+    /* ---------------- DISCONNECT ---------------- */
     socket.on("disconnect", async () => {
       console.log("[gateway] socket disconnected:", socket.id);
 
