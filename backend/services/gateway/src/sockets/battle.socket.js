@@ -292,28 +292,32 @@ export function registerBattleSocket(io) {
 
     /* ---------------- GET ROOM STATE (refresh/new tab) ---------------- */
     socket.on("room:get", async ({ roomId }, cb) => {
-      try {
-        if (!socket.user?.userId) return cb?.({ ok: false, message: "Unauthorized" });
+  try {
+    if (!socket.user?.userId)
+      return cb?.({ ok: false, message: "Unauthorized" });
 
-        const room = await getRoom(roomId);
-        if (!room) return cb?.({ ok: false, message: "Room not found" });
+    const room = await getRoom(roomId);
+    if (!room) return cb?.({ ok: false, message: "Room not found" });
 
-        socket.join(roomId);
-        trackJoin(socket, roomId);
+    socket.join(roomId);
+    trackJoin(socket, roomId);
 
-        cb?.({ ok: true, room });
+    cb?.({ ok: true, room });
 
-        socket.emit("room:update", room);
-        socket.emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
+    // 🔥 update everyone
+    io.to(roomId).emit("room:update", room);
 
-        // if already ACTIVE, help frontend
-        if (String(room.status || "").toUpperCase() === "ACTIVE") {
-          socket.emit("battle:started", room);
-        }
-      } catch (e) {
-        cb?.({ ok: false, message: e?.message || "Failed to load room" });
-      }
+    socket.emit("lobby:timer", {
+      lobbyClosesAtMs: room.lobbyClosesAtMs,
     });
+
+    if (String(room.status || "").toUpperCase() === "ACTIVE") {
+      socket.emit("battle:started", room);
+    }
+  } catch (e) {
+    cb?.({ ok: false, message: e?.message || "Failed to load room" });
+  }
+});
 
     /* ---------------- HOST MANUAL START (NEW) ---------------- */
     socket.on("battle:start", async ({ roomId }, cb) => {
