@@ -208,11 +208,22 @@ async function finalizeLobby(io, roomId) {
   const count = Number(room.players?.length || 0);
   const need = minNeed(room);
 
+  // ✅ DON'T CANCEL when only host is waiting
+  // Just keep the room in WAITING state.
   if (count < need) {
-    const cancelled = await cancelRoom(roomId, `Room requires minimum ${need} players`);
-    io.to(roomId).emit("room:update", cancelled);
-    io.to(roomId).emit("room:cancelled", cancelled?.cancelledReason || `Room requires minimum ${need} players`);
-    await persistOnce(cancelled);
+    io.to(roomId).emit("room:update", room);
+
+    // Optional: tell host why it didn't start
+    io.to(roomId).emit(
+      "room:info",
+      `Waiting for more players (${count}/${need}). Share the room code.`
+    );
+
+    // ✅ Optional: extend lobby timer so UI doesn't go negative
+    // room.lobbyClosesAtMs = Date.now() + 2 * 60 * 1000; // +2 mins
+    // await saveRoom(roomId, room); // if you expose saveRoom
+    // io.to(roomId).emit("lobby:timer", { lobbyClosesAtMs: room.lobbyClosesAtMs });
+
     clearLobbyTimer(roomId);
     return;
   }
